@@ -1,70 +1,55 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/go-kit/kit/log"
+	kitprometheus "github.com/go-kit/kit/metrics/prometheus"
 	httptransport "github.com/go-kit/kit/transport/http"
+	stdprometheus "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
-
-type loggingMiddleware struct {
-	logger log.Logger
-	next   StringService
-}
-
-func (mw loggingMiddleware) Uppercase(s string) (output string, err error) {
-	defer func(begin time.Time) {
-		mw.logger.Log(
-			"method", "uppercase",
-			"input", s,
-			"output", output,
-			"err", err,
-			"took", time.Since(begin),
-		)
-	}(time.Now())
-
-	output, err = mw.next.Uppercase(s)
-	return
-}
-
-func (mw loggingMiddleware) Count(s string) (n int) {
-	defer func(begin time.Time) {
-		mw.logger.Log(
-			"method", "count",
-			"input", s,
-			"n", n,
-			"took", time.Since(begin),
-		)
-	}(time.Now())
-
-	n = mw.next.Count(s)
-	return
-}
-
-func (mw loggingMiddleware) Lowercase(s string) (output string, err error) {
-	defer func(begin time.Time) {
-		mw.logger.Log(
-			"method", "uppercase",
-			"input", s,
-			"output", output,
-			"err", err,
-			"took", time.Since(begin),
-		)
-	}(time.Now())
-
-	output, err = mw.next.Lowercase(s)
-	return
-}
 
 // curl -XPOST -d'{"s":"hello, world"}' localhost:8080/uppercase
 func main() {
-	logger := log.NewLogfmtLogger(os.Stdout)
+	var (
+		listen = flag.String("listen", ":8080", "HTTP listen address")
+		proxy  = flag.String("proxy", "", "Optional comma-separated list of URLs to proxy uppercase requests")
+	)
+	flag.Parse()
+
+	var logger log.Logger
+	logger = log.NewLogfmtLogger(os.Stderr)
+	logger = log.With(logger, "listen", *listen, "caller", log.DefaultCaller)
+
+	fieldKeys := []string{"method", "error"}
+	requestCount := kitprometheus.NewCounterFrom(stdprometheus.CounterOpts{
+		Namespace: "my_group",
+		Subsystem: "string_service",
+		Name:      "request_count",
+		Help:      "Number of requests received.",
+	}, fieldKeys)
+	requestLatency := kitprometheus.NewSummaryFrom(stdprometheus.SummaryOpts{
+		Namespace: "my_group",
+		Subsystem: "string_service",
+		Name:      "request_latency_microseconds",
+		Help:      "Total duration of requests in microseconds.",
+	}, fieldKeys)
+	countResult := kitprometheus.NewSummaryFrom(stdprometheus.SummaryOpts{
+		Namespace: "my_group",
+		Subsystem: "string_service",
+		Name:      "count_result",
+		Help:      "The result of each count method.",
+	}, []string{})
 
 	var svc StringService
 	svc = stringService{}
-	svc = loggingMiddleware{logger, svc}
+	svc = proxyingMiddleware(context.Background(), *proxy, logger)(svc)
+	svc = loggingMiddleware(logger)(svc)
+	svc = instrumentingMiddleware(requestCount, requestLatency, countResult)(svc)
 
 	uppercaseHandler := httptransport.NewServer(
 		makeUppercaseEndpoint(svc),
@@ -87,5 +72,7 @@ func main() {
 	http.Handle("/uppercase", uppercaseHandler)
 	http.Handle("/count", countHandler)
 	http.Handle("/lowercase", lowercaseHandler)
-	logger.Log(http.ListenAndServe(":8080", nil))
+	http.Handle("/metrics", promhttp.Handler())
+	logger.Log("msg", "HTTP", "addr", *listen)
+	logger.Log("err", http.ListenAndServe(*listen, nil))
 }
