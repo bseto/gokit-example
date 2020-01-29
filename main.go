@@ -1,133 +1,70 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"github.com/go-kit/kit/endpoint"
-	"strings"
-
-	"encoding/json"
-	"log"
 	"net/http"
+	"os"
+	"time"
 
+	"github.com/go-kit/kit/log"
 	httptransport "github.com/go-kit/kit/transport/http"
 )
 
-type uppercaseRequest struct {
-	S string `json:"s"`
+type loggingMiddleware struct {
+	logger log.Logger
+	next   StringService
 }
 
-type uppercaseResponse struct {
-	V   string `json:"v"`
-	Err string `json:"err,omitempty"` // errors don't JSON-marshal, so we use a string
+func (mw loggingMiddleware) Uppercase(s string) (output string, err error) {
+	defer func(begin time.Time) {
+		mw.logger.Log(
+			"method", "uppercase",
+			"input", s,
+			"output", output,
+			"err", err,
+			"took", time.Since(begin),
+		)
+	}(time.Now())
+
+	output, err = mw.next.Uppercase(s)
+	return
 }
 
-type countRequest struct {
-	S string `json:"s"`
+func (mw loggingMiddleware) Count(s string) (n int) {
+	defer func(begin time.Time) {
+		mw.logger.Log(
+			"method", "count",
+			"input", s,
+			"n", n,
+			"took", time.Since(begin),
+		)
+	}(time.Now())
+
+	n = mw.next.Count(s)
+	return
 }
 
-type countResponse struct {
-	V int `json:"v"`
+func (mw loggingMiddleware) Lowercase(s string) (output string, err error) {
+	defer func(begin time.Time) {
+		mw.logger.Log(
+			"method", "uppercase",
+			"input", s,
+			"output", output,
+			"err", err,
+			"took", time.Since(begin),
+		)
+	}(time.Now())
+
+	output, err = mw.next.Lowercase(s)
+	return
 }
 
-type lowercaseRequest struct {
-	S string `json:"s"`
-}
-
-type lowercaseResponse struct {
-	V   string `json:"v"`
-	Err string `json:"err,omitempty"` // errors don't JSON-marshal, so we use a string
-}
-
-type stringService struct{}
-
-func (stringService) Uppercase(s string) (string, error) {
-	if s == "" {
-		return "", ErrEmpty
-	}
-	return strings.ToUpper(s), nil
-}
-
-func (stringService) Count(s string) int {
-	return len(s)
-}
-
-func (stringService) Lowercase(s string) (string, error) {
-	if s == "" {
-		return "", ErrEmpty
-	}
-	return strings.ToLower(s), nil
-}
-
-// ErrEmpty is returned when input string is empty
-var ErrEmpty = errors.New("Empty string")
-
-type StringService interface {
-	Uppercase(string) (string, error)
-	Count(string) int
-	Lowercase(string) (string, error)
-}
-
-func makeLowercaseEndpoint(svc StringService) endpoint.Endpoint {
-	return func(_ context.Context, request interface{}) (interface{}, error) {
-		req := request.(lowercaseRequest)
-		v, err := svc.Lowercase(req.S)
-		if err != nil {
-			return uppercaseResponse{v, err.Error()}, nil
-		}
-		return lowercaseResponse{v, ""}, nil
-	}
-}
-
-func makeUppercaseEndpoint(svc StringService) endpoint.Endpoint {
-	return func(_ context.Context, request interface{}) (interface{}, error) {
-		req := request.(uppercaseRequest)
-		v, err := svc.Uppercase(req.S)
-		if err != nil {
-			return uppercaseResponse{v, err.Error()}, nil
-		}
-		return uppercaseResponse{v, ""}, nil
-	}
-}
-
-func makeCountEndpoint(svc StringService) endpoint.Endpoint {
-	return func(_ context.Context, request interface{}) (interface{}, error) {
-		req := request.(countRequest)
-		v := svc.Count(req.S)
-		return countResponse{v}, nil
-	}
-}
-
-func decodeUppercaseRequest(_ context.Context, r *http.Request) (interface{}, error) {
-	var request uppercaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return nil, err
-	}
-	return request, nil
-}
-
-func decodeCountRequest(_ context.Context, r *http.Request) (interface{}, error) {
-	var request countRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return nil, err
-	}
-	return request, nil
-}
-
-func decodeLowercaseRequest(_ context.Context, r *http.Request) (interface{}, error) {
-	var request lowercaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return nil, err
-	}
-	return request, nil
-}
-
-func encodeResponse(_ context.Context, w http.ResponseWriter, response interface{}) error {
-	return json.NewEncoder(w).Encode(response)
-}
-
+// curl -XPOST -d'{"s":"hello, world"}' localhost:8080/uppercase
 func main() {
-	svc := stringService{}
+	logger := log.NewLogfmtLogger(os.Stdout)
+
+	var svc StringService
+	svc = stringService{}
+	svc = loggingMiddleware{logger, svc}
 
 	uppercaseHandler := httptransport.NewServer(
 		makeUppercaseEndpoint(svc),
@@ -150,5 +87,5 @@ func main() {
 	http.Handle("/uppercase", uppercaseHandler)
 	http.Handle("/count", countHandler)
 	http.Handle("/lowercase", lowercaseHandler)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	logger.Log(http.ListenAndServe(":8080", nil))
 }
